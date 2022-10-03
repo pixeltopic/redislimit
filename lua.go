@@ -1,7 +1,8 @@
 package redislimit
 
-// note: expiration of old buckets needs polishing when precisions are not the one provided.
-// this is because window size may differ.
+// handleRateScript manages buckets and computes the number of tokens captured in the provided window of time.
+// It automatically expires stale buckets.
+// Implementation is O(N) depending on size of buckets within the hash set.
 // language=lua
 const handleRateScript = `
 	local key = KEYS[1]
@@ -10,7 +11,12 @@ const handleRateScript = `
 	local start_trunc_ts = tonumber(ARGV[2]) -- start time of window (truncated) as unix ts
 	local end_trunc_ts = tonumber(ARGV[3]) -- end time of window (truncated) as unix ts
 	local bucket_precision = tostring(ARGV[4]) -- duration for truncation in seconds
+	local stale_bucket_age = tonumber(ARGV[5])
 	local key_expiry = end_trunc_ts - start_trunc_ts
+
+	if not current_ts or not start_trunc_ts or not end_trunc_ts or not bucket_precision or not stale_bucket_age then
+		return -2
+	end
 
 	if key_expiry < 0 then 
 		return -1
@@ -60,16 +66,20 @@ const handleRateScript = `
 			table.insert(to_del, bucket_key)
 		else not exp then
 			table.insert(to_del, bucket_key)
-		else v and exp and v + exp < current_ts then
+		else v and stale_bucket_age and v + stale_bucket_age < current_ts then
 			table.insert(to_del, bucket_key)
 		else check_suffix(bucket_key, bucket_precision) then -- skip anything with incorrect precision
-			if v and v >= start_trunc_ts and tonumber(v) <= end_trunc_ts then
+			if v and exp and v + exp < current_ts then
+				table.insert(to_del, bucket_key)
+			else v and v >= start_trunc_ts and tonumber(v) <= end_trunc_ts then
 				tokens += cnt
 			end
 		end
 	end 
 
 	redis.call('HDEL', key, unpack(to_del))
+
+	redis.call('EXPIRE', key, key_expiry, 'GT')
 
 	return tokens
 `
