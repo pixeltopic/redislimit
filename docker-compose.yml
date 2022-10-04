@@ -1,0 +1,73 @@
+version: "3.9"
+
+volumes:
+  redis-node-1: {}
+  redis-node-2: {}
+  redis-node-3: {}
+networks:
+  net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.0.0.0/16
+services:
+  redislimit:
+    build:
+      context: .
+      dockerfile: ./example.Dockerfile
+    volumes:
+      - ./bin:/redislimit
+    env_file:
+      - .env
+    ports:
+      - "8001:8001"
+    environment:
+      REDIS_ENDPOINT: redis-node-1:6379
+    depends_on:
+      redis-cluster-setup:
+        condition: service_started
+    networks:
+      - net
+  redis-cluster-setup:
+    image: redis:6.2.7
+    command: redis-cli -p 6379 --cluster create 10.0.0.11:6379 10.0.0.12:6379 10.0.0.13:6379 --cluster-replicas 0 --cluster-yes
+    networks:
+      net:
+        ipv4_address: 10.0.0.22
+    depends_on:
+      - redis-node-1
+      - redis-node-2
+      - redis-node-3
+  redis-node-1:
+    image: redis:6.2.7
+    container_name: redis-node-1
+    command: redis-server --cluster-enabled yes
+    networks:
+      net:
+        ipv4_address: 10.0.0.11
+    ports:
+      - "7001:6379"
+    volumes:
+      - redis-node-1:/data
+  redis-node-2:
+    image: redis:6.2.7
+    container_name: redis-node-2
+    command: redis-server --cluster-enabled yes
+    networks:
+      net:
+        ipv4_address: 10.0.0.12
+    ports:
+      - "7002:6379"
+    volumes:
+      - redis-node-2:/data
+  redis-node-3:
+    image: redis:6.2.7
+    container_name: redis-node-3
+    command: redis-server --cluster-enabled yes
+    networks:
+      net:
+        ipv4_address: 10.0.0.13
+    ports:
+      - "7003:6379"
+    volumes:
+      - redis-node-3:/data
