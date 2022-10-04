@@ -23,8 +23,6 @@ func TestRateLimitScript(t *testing.T) {
 		deny  = int64(0)
 	)
 
-	// TODO: failed requests should not increment - confirm
-
 	type testCase struct {
 		name            string
 		windowSize      time.Duration
@@ -117,6 +115,42 @@ func TestRateLimitScript(t *testing.T) {
 					return
 				}
 				assert.Len(t, buckets, 4)
+			},
+		},
+		{
+			name:            "script should not increment tokens if it is already at threshold",
+			windowSize:      5 * time.Minute,
+			bucketPrecision: time.Minute,
+			staleBucketAge:  time.Hour,
+			threshold:       2,
+			testFunc: func(tc testCase, t *testing.T, server *miniredis.Miniredis, client *redis.ClusterClient, scriptArgs []any) {
+				_, err := client.HSet(context.Background(), "foo", newBucket(0, tc.bucketPrecision, 1)...).Result()
+				if !assert.NoError(t, err) {
+					return
+				}
+
+				code, err := client.Eval(context.Background(), rateLimitScript, []string{"foo"}, scriptArgs...).Int64()
+				if !assert.NoError(t, err) {
+					return
+				}
+
+				assert.Equal(t, allow, code)
+				assert.Greater(t, int64(server.TTL("foo")), int64(0))
+
+				code, err = client.Eval(context.Background(), rateLimitScript, []string{"foo"}, scriptArgs...).Int64()
+				if !assert.NoError(t, err) {
+					return
+				}
+
+				assert.Equal(t, deny, code)
+
+				buckets, err := client.HGetAll(context.Background(), "foo").Result()
+				if !assert.NoError(t, err) {
+					return
+				}
+
+				assert.Len(t, buckets, 1)
+				assert.Equal(t, "2", buckets["1664832840:60"])
 			},
 		},
 	}
