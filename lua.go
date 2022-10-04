@@ -11,10 +11,15 @@ const rateLimitScript = `
 	local end_trunc_ts = tonumber(ARGV[3]) -- end time of window (truncated) as unix ts
 	local bucket_precision = tostring(ARGV[4]) -- duration for truncation in seconds
 	local stale_bucket_age = tonumber(ARGV[5])
+	local threshold = tonumber(ARGV[6])
+
 	local key_expiry = end_trunc_ts - start_trunc_ts
-	if not current_ts or not start_trunc_ts or not end_trunc_ts or not bucket_precision or not stale_bucket_age then
-		return -2
+	if not current_ts or not start_trunc_ts or not end_trunc_ts or not bucket_precision or not stale_bucket_age or not threshold then
+		return -3
 	end
+	if threshold <= 0 then
+		return -2
+	end 
 	if key_expiry < 0 then 
 		return -1
 	end
@@ -41,12 +46,12 @@ const rateLimitScript = `
 	end
 	local exists = redis.call('EXISTS', hash_key)
 	if exists ~= 1 then
-		local tokens = redis.call('HINCRBY', hash_key, get_bucket_key(end_trunc_ts, bucket_precision), 1)
+		redis.call('HINCRBY', hash_key, get_bucket_key(end_trunc_ts, bucket_precision), 1)
 		redis.call('EXPIRE', hash_key, key_expiry)
-		return tokens
+		return 1
 	end 
-	redis.call('HINCRBY', hash_key, get_bucket_key(end_trunc_ts, bucket_precision), 1)
-	local tokens = 0
+	
+	local tokens = 1
 	local to_del = {}
 	local to_del_len = 0
  
@@ -78,7 +83,7 @@ const rateLimitScript = `
 				tokens = tokens + tonumber(cnt)
 			end
 		end
-	end 
+	end
  
 	if to_del_len > 0 then
 		redis.call('HDEL', hash_key, unpack(to_del))
@@ -88,6 +93,10 @@ const rateLimitScript = `
 	if ttl < key_expiry then
 		redis.call('EXPIRE', hash_key, key_expiry)
 	end
- 
-	return tokens
+
+	if tokens <= threshold then
+		redis.call('HINCRBY', hash_key, get_bucket_key(end_trunc_ts, bucket_precision), 1) 
+		return 1
+	end
+	return 0
 `

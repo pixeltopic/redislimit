@@ -14,18 +14,24 @@ import (
 func TestRateLimitScript(t *testing.T) {
 	now := time.Unix(1664832874, 0)
 
-	createBuckets := func(bucketPosition int, precision time.Duration, count int) []interface{} {
-		var buckets []interface{}
-		buckets = append(buckets, fmt.Sprintf("%v:%v", now.Add(-1*time.Duration(bucketPosition)*precision).Truncate(precision).Unix(), precision.Seconds()), count)
-		return buckets
+	newBucket := func(bucketPosition int, precision time.Duration, count int) []any {
+		return append([]any{}, fmt.Sprintf("%v:%v", now.Add(-1*time.Duration(bucketPosition)*precision).Truncate(precision).Unix(), precision.Seconds()), count)
 	}
+
+	const (
+		allow = int64(1)
+		deny  = int64(0)
+	)
+
+	// TODO: failed requests should not increment - confirm
 
 	type testCase struct {
 		name            string
 		windowSize      time.Duration
 		bucketPrecision time.Duration
 		staleBucketAge  time.Duration
-		testFunc        func(tc testCase, t *testing.T, server *miniredis.Miniredis, client *redis.ClusterClient, scriptArgs []interface{})
+		threshold       int64
+		testFunc        func(tc testCase, t *testing.T, server *miniredis.Miniredis, client *redis.ClusterClient, scriptArgs []any)
 	}
 
 	testCases := []testCase{
@@ -34,12 +40,13 @@ func TestRateLimitScript(t *testing.T) {
 			windowSize:      time.Minute,
 			bucketPrecision: time.Minute,
 			staleBucketAge:  time.Hour,
-			testFunc: func(tc testCase, t *testing.T, server *miniredis.Miniredis, client *redis.ClusterClient, scriptArgs []interface{}) {
-				tokens, err := client.Eval(context.Background(), rateLimitScript, []string{"foo"}, scriptArgs...).Int64()
+			threshold:       2,
+			testFunc: func(tc testCase, t *testing.T, server *miniredis.Miniredis, client *redis.ClusterClient, scriptArgs []any) {
+				code, err := client.Eval(context.Background(), rateLimitScript, []string{"foo"}, scriptArgs...).Int64()
 				if !assert.NoError(t, err) {
 					return
 				}
-				assert.Equal(t, int64(1), tokens)
+				assert.Equal(t, allow, code)
 				assert.Greater(t, int64(server.TTL("foo")), int64(0))
 			},
 		},
@@ -48,16 +55,17 @@ func TestRateLimitScript(t *testing.T) {
 			windowSize:      5 * time.Minute,
 			bucketPrecision: time.Minute,
 			staleBucketAge:  time.Hour,
-			testFunc: func(tc testCase, t *testing.T, server *miniredis.Miniredis, client *redis.ClusterClient, scriptArgs []interface{}) {
+			threshold:       2,
+			testFunc: func(tc testCase, t *testing.T, server *miniredis.Miniredis, client *redis.ClusterClient, scriptArgs []any) {
 				_, err := client.Eval(context.Background(), rateLimitScript, []string{"foo"}, scriptArgs...).Int64()
 				if !assert.NoError(t, err) {
 					return
 				}
-				tokens, err := client.Eval(context.Background(), rateLimitScript, []string{"foo"}, scriptArgs...).Int64()
+				code, err := client.Eval(context.Background(), rateLimitScript, []string{"foo"}, scriptArgs...).Int64()
 				if !assert.NoError(t, err) {
 					return
 				}
-				assert.Equal(t, int64(2), tokens)
+				assert.Equal(t, allow, code)
 				assert.Greater(t, int64(server.TTL("foo")), int64(0))
 			},
 		},
@@ -66,41 +74,42 @@ func TestRateLimitScript(t *testing.T) {
 			windowSize:      5 * time.Minute,
 			bucketPrecision: time.Minute,
 			staleBucketAge:  time.Hour,
-			testFunc: func(tc testCase, t *testing.T, server *miniredis.Miniredis, client *redis.ClusterClient, scriptArgs []interface{}) {
+			threshold:       7,
+			testFunc: func(tc testCase, t *testing.T, server *miniredis.Miniredis, client *redis.ClusterClient, scriptArgs []any) {
 
 				// this first one is outside of the window, so it'll get pruned.
-				_, err := client.HSet(context.Background(), "foo", createBuckets(5, tc.bucketPrecision, 2)...).Result()
+				_, err := client.HSet(context.Background(), "foo", newBucket(5, tc.bucketPrecision, 2)...).Result()
 				if !assert.NoError(t, err) {
 					return
 				}
 				// this one will get pruned because it is beyond stale bucket age despite it having another precision
-				_, err = client.HSet(context.Background(), "foo", createBuckets(5, time.Minute*15, 2)...).Result()
+				_, err = client.HSet(context.Background(), "foo", newBucket(5, time.Minute*15, 2)...).Result()
 				if !assert.NoError(t, err) {
 					return
 				}
-				_, err = client.HSet(context.Background(), "foo", createBuckets(1, time.Minute*15, 2)...).Result()
+				_, err = client.HSet(context.Background(), "foo", newBucket(1, time.Minute*15, 2)...).Result()
 				if !assert.NoError(t, err) {
 					return
 				}
-				_, err = client.HSet(context.Background(), "foo", createBuckets(4, tc.bucketPrecision, 2)...).Result()
+				_, err = client.HSet(context.Background(), "foo", newBucket(4, tc.bucketPrecision, 2)...).Result()
 				if !assert.NoError(t, err) {
 					return
 				}
-				_, err = client.HSet(context.Background(), "foo", createBuckets(1, tc.bucketPrecision, 2)...).Result()
+				_, err = client.HSet(context.Background(), "foo", newBucket(1, tc.bucketPrecision, 2)...).Result()
 				if !assert.NoError(t, err) {
 					return
 				}
-				_, err = client.HSet(context.Background(), "foo", createBuckets(0, tc.bucketPrecision, 2)...).Result()
-				if !assert.NoError(t, err) {
-					return
-				}
-
-				tokens, err := client.Eval(context.Background(), rateLimitScript, []string{"foo"}, scriptArgs...).Int64()
+				_, err = client.HSet(context.Background(), "foo", newBucket(0, tc.bucketPrecision, 2)...).Result()
 				if !assert.NoError(t, err) {
 					return
 				}
 
-				assert.Equal(t, int64(7), tokens)
+				code, err := client.Eval(context.Background(), rateLimitScript, []string{"foo"}, scriptArgs...).Int64()
+				if !assert.NoError(t, err) {
+					return
+				}
+
+				assert.Equal(t, allow, code)
 				assert.Greater(t, int64(server.TTL("foo")), int64(0))
 
 				buckets, err := client.HGetAll(context.Background(), "foo").Result()
@@ -127,7 +136,7 @@ func TestRateLimitScript(t *testing.T) {
 			})
 
 			args := []interface{}{
-				now.Unix(), startOfWindow, endOfWindow, tc.bucketPrecision.Seconds(), tc.staleBucketAge.Seconds()}
+				now.Unix(), startOfWindow, endOfWindow, tc.bucketPrecision.Seconds(), tc.staleBucketAge.Seconds(), tc.threshold}
 
 			tc.testFunc(tc, t, mockRedisServer, c, args)
 		})

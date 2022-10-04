@@ -104,20 +104,30 @@ func (c *Client) Allow(ctx context.Context, key string) (bool, error) {
 	startOfWindow := now.Add(-1 * c.conf.WindowSize).Truncate(c.conf.BucketPrecision).Unix()
 	endOfWindow := now.Truncate(c.conf.BucketPrecision).Unix()
 
-	res, err := c.d.Eval(ctx, rateLimitScript, key, []interface{}{
-		now.Unix(), startOfWindow, endOfWindow, c.conf.BucketPrecision.Seconds(), c.conf.StaleBucketAge.Seconds()})
+	res, err := c.d.Eval(ctx, rateLimitScript, key, []any{
+		now.Unix(),
+		startOfWindow,
+		endOfWindow,
+		c.conf.BucketPrecision.Seconds(),
+		c.conf.StaleBucketAge.Seconds(),
+		c.conf.ThresholdInWindow,
+	})
+
 	if err != nil {
 		return false, err
 	}
-	tokens, ok := res.(int64)
-	if tokens == -1 {
-		return false, fmt.Errorf("window size is less than or equal to 0 seconds: %v seconds", endOfWindow-startOfWindow)
-	}
-	if tokens == -2 {
+	result, ok := res.(int64)
+
+	switch result {
+	case -3:
+		return false, errors.New("threshold must be an integer greater than 0")
+	case -2:
 		return false, errors.New("invalid arguments provided to rate limit script")
+	case -1:
+		return false, fmt.Errorf("window size is less than or equal to 0 seconds: %v seconds", endOfWindow-startOfWindow)
 	}
 	if !ok {
 		return false, fmt.Errorf("could not convert %T to int64", res)
 	}
-	return tokens <= c.conf.ThresholdInWindow, nil
+	return result == 1, nil
 }
